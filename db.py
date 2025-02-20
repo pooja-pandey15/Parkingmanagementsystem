@@ -1,90 +1,105 @@
 import sqlite3
-from datetime import datetime
+import bcrypt
 
-DB_FILE = "data/parking.db"
+DB_FILE = "parking.db"
 
-def connect_db():
-    """Connect to SQLite database and create tables if not exists."""
+def get_db_connection():
+    """Establish and return a database connection."""
     conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    
-    # Table for parking data
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS parking (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            vehicle_type TEXT,
-            plate_number TEXT UNIQUE,
-            entry_time TEXT,
-            exit_time TEXT DEFAULT NULL,
-            fare REAL DEFAULT 0
-        )
-    ''')
+    conn.execute("PRAGMA foreign_keys = ON")  # Enforce foreign key constraints
+    return conn
 
-    # Table for users (authentication)
+def initialize_db():
+    """Create necessary tables if they do not exist."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    # Create users table
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             username TEXT UNIQUE NOT NULL,
-            password TEXT NOT NULL
+            password_hash TEXT NOT NULL
         )
     ''')
-    
-    conn.commit()
-    return conn
 
-def add_vehicle(vehicle_type, plate_number):
-    """Adds a vehicle with automatic entry time."""
-    conn = connect_db()
+    # Create parking records table
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS parking_records (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            plate_number TEXT UNIQUE NOT NULL,
+            vehicle_type TEXT NOT NULL,
+            entry_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+            exit_time DATETIME,
+            fare REAL
+        )
+    ''')
+
+    conn.commit()
+    conn.close()
+
+def register_user(username, password):
+    """Register a new user with hashed password."""
+    conn = get_db_connection()
     cursor = conn.cursor()
-    
-    entry_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    # Hash the password
+    password_hash = bcrypt.hashpw(password.encode(), bcrypt.gensalt())
 
     try:
-        cursor.execute('''
-            INSERT INTO parking (vehicle_type, plate_number, entry_time)
-            VALUES (?, ?, ?)
-        ''', (vehicle_type, plate_number, entry_time))
+        cursor.execute("INSERT INTO users (username, password_hash) VALUES (?, ?)", (username, password_hash))
         conn.commit()
         return True
     except sqlite3.IntegrityError:
-        print("Error: Vehicle with this plate number already exists.")
-        return False
+        return False  # Username already exists
+    finally:
+        conn.close()
+
+def authenticate_user(username, password):
+    """Verify user login credentials."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("SELECT password_hash FROM users WHERE username = ?", (username,))
+    user = cursor.fetchone()
+    
+    conn.close()
+
+    if user and bcrypt.checkpw(password.encode(), user[0]):
+        return True
+    return False
+
+def add_vehicle(plate_number, vehicle_type):
+    """Insert a new vehicle entry into the database."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    try:
+        cursor.execute("INSERT INTO parking_records (plate_number, vehicle_type) VALUES (?, ?)", (plate_number, vehicle_type))
+        conn.commit()
+        return True
+    except sqlite3.IntegrityError:
+        return False  # Plate number already exists
     finally:
         conn.close()
 
 def exit_vehicle(plate_number):
-    """Updates exit time and calculates fare."""
-    conn = connect_db()
+    """Calculate fare and update exit time for a vehicle."""
+    conn = get_db_connection()
     cursor = conn.cursor()
 
-    cursor.execute("SELECT entry_time, vehicle_type FROM parking WHERE plate_number = ?", (plate_number,))
-    result = cursor.fetchone()
+    cursor.execute("SELECT vehicle_type FROM parking_records WHERE plate_number = ? AND exit_time IS NULL", (plate_number,))
+    record = cursor.fetchone()
 
-    if result:
-        entry_time, vehicle_type = result
-        exit_time = datetime.now()
-        entry_time = datetime.strptime(entry_time, "%Y-%m-%d %H:%M:%S")
-
-        duration_hours = (exit_time - entry_time).total_seconds() / 3600
-        rate_per_hour = 50 if vehicle_type.lower() == "car" else 20
-        fare = round(duration_hours * rate_per_hour, 2)
-
-        cursor.execute('''
-            UPDATE parking SET exit_time = ?, fare = ? WHERE plate_number = ?
-        ''', (exit_time.strftime("%Y-%m-%d %H:%M:%S"), fare, plate_number))
-        
-        conn.commit()
+    if not record:
         conn.close()
-        return True
-    else:
-        conn.close()
-        return False
+        return None  # Vehicle not found
 
-def get_all_vehicles():
-    """Fetch all vehicles from the database."""
-    conn = connect_db()
-    cursor = conn.cursor()
-    cursor.execute("SELECT id, vehicle_type, plate_number, entry_time, exit_time, fare FROM parking")
-    data = cursor.fetchall()
+    vehicle_type = record[0]
+    fare = 5 if vehicle_type == "bike" else 10  # Example fare calculation
+
+    cursor.execute("UPDATE parking_records SET exit_time = CURRENT_TIMESTAMP, fare = ? WHERE plate_number = ?", (fare, plate_number))
+    conn.commit()
     conn.close()
-    return data
+
+    return fare
